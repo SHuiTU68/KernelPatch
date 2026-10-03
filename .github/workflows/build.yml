@@ -3,6 +3,13 @@ name: Build CI
 on:
   workflow_call:
   workflow_dispatch:
+  push:
+    paths:
+      - 'kernel/**'
+      - 'tools/**'
+      - 'kpms/**'
+      - 'version'
+      - '.github/workflows/build.yml'
 
 jobs:
   Build-on-Ubuntu:
