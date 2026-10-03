@@ -138,3 +138,31 @@ long kp_su_reset_path_sc(const char __user *upath)
 	kfree(path);
 	return rc;
 }
+
+long kp_su_get_all_allow_sctx_sc(char __user *ubuf, int buf_len)
+{
+	const char *sctx = kp_get_all_allow_sctx();
+	int len = strlen(sctx);
+	/* The userspace wrapper (supercall.h sc_su_get_all_allow_sctx) does not
+	 * forward a length, so a0 means "use the full scontext field" here. */
+	int cap = buf_len > 0 ? buf_len : SUPERCALL_SCONTEXT_LEN;
+
+	logki("su_get_all_allow_sctx: %s len=%d cap=%d\n", sctx, len, cap);
+	if (cap <= len)
+		return -ENOBUFS;
+	if (copy_to_user(ubuf, sctx, len + 1))
+		return -EFAULT;
+	return 0;
+}
+
+long kp_su_set_all_allow_sctx_sc(const char __user *usctx)
+{
+	char *sctx = strndup_user(usctx, SUPERCALL_SCONTEXT_LEN);
+	int rc;
+
+	if (IS_ERR(sctx))
+		return PTR_ERR(sctx);
+	rc = kp_set_all_allow_sctx(sctx);
+	kfree(sctx);
+	return rc;
+}

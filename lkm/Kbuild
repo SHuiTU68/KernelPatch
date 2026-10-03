@@ -91,6 +91,10 @@ CFLAGS_hook/hook_engine.o += -fno-lto
 # secpass calls kernel function pointers through backup variables; exempt from
 # CFI so the backup calls don't recurse into the CFI slowpath.
 CFLAGS_infra/secpass.o += -fno-sanitize=cfi
+# accctl calls the saved avc_denied trampoline through a function pointer whose
+# type cannot be matched with the KMI's signature (it varies per kernel);
+# exempt it from CFI for the same reason as secpass.
+CFLAGS_supercall/accctl.o += -fno-sanitize=cfi
 # _transit4 runs from a kernel text function's inline hook; x18 there is NOT the
 # module's shadow-call-stack. Disable SCS so the transit never writes x30 through
 # x18 (str x30,[x18]) into garbage -> CPU fault -> watchdog bite on that core.

@@ -67,6 +67,10 @@ long kp_handle_supercall(long cmd, long a1, long a2, long a3, long a4)
 		return kp_su_get_path_sc((char __user *)a1, (int)a2);
 	case SUPERCALL_SU_RESET_PATH:
 		return kp_su_reset_path_sc((const char __user *)a1);
+	case SUPERCALL_SU_GET_ALLOW_SCTX:
+		return kp_su_get_all_allow_sctx_sc((char __user *)a1, (int)a2);
+	case SUPERCALL_SU_SET_ALLOW_SCTX:
+		return kp_su_set_all_allow_sctx_sc((const char __user *)a1);
 
 	case SUPERCALL_KPM_LOAD:
 		return kp_kpm_load_sc((const char __user *)a1, (const char __user *)a2,

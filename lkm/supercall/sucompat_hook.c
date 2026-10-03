@@ -233,7 +233,9 @@ static const char *kp_default_sctx(uid_t uid)
 		strscpy(sctx, profile.scontext, sizeof(sctx));
 		return sctx;
 	}
-	return ALL_ALLOW_SCONTEXT_MAGISK;
+	/* No per-uid override: follow the live default, i.e. the kernel domain
+	 * once the SELinux bypass is armed (see kp_get_default_su_sctx). */
+	return kp_get_default_su_sctx();
 }
 
 static long kp_execve_handler(const struct pt_regs *regs)

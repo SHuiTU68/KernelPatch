@@ -6,6 +6,7 @@
  * interception hooks are out of scope for the LKM framework).
  */
 #include "sucompat.h"
+#include "accctl.h"
 #include "kstorage.h"
 
 #include <linux/err.h>
@@ -27,6 +28,9 @@
 /* APatch config files, auto-read at module init. */
 #define AP_SU_PATH_FILE "/data/adb/ap/su_path"
 #define AP_PACKAGE_CONFIG_PATH "/data/adb/ap/package_config"
+/* Single-line override of the all-allow SELinux context used for granted
+ * roots (e.g. "u:r:kernel:s0"). Written by the manager; absent on stock KP. */
+#define AP_SU_SCTX_FILE "/data/adb/ap/su_sctx"
 
 static const char default_su_path[] = SU_PATH; /* "/system/bin/kp" */
 
@@ -159,11 +163,13 @@ int kp_sucompat_init(void)
 	if (exclude_group < 0)
 		logkw("failed to alloc kstorage group for ap module exclude\n");
 	current_su_path[0] = '\0';
-	/* Shell and root are allowed by default with the magisk domain, matching
-	 * KP's all_allow_sctx = ALL_ALLOW_SCONTEXT_MAGISK. The u:r:kernel:s0
-	 * domain cannot exec /system/bin/sh, so the root shell needs this. */
-	kp_su_add_allow_uid(2000, 0, ALL_ALLOW_SCONTEXT_MAGISK);
-	kp_su_add_allow_uid(0, 0, ALL_ALLOW_SCONTEXT_MAGISK);
+	/* Shell and root are allowed by default. The scontext is left empty on
+	 * purpose so both keep following the live default (kp_get_default_su_sctx)
+	 * instead of being frozen to whatever was current at module init: that is
+	 * what lets the manager switch a ramdisk/init_boot patch from the magisk
+	 * domain to the kernel domain without a reboot. */
+	kp_su_add_allow_uid(2000, 0, NULL);
+	kp_su_add_allow_uid(0, 0, NULL);
 	logki("su allowlist ready (group %d)\n", su_group);
 	return 0;
 }
@@ -376,6 +382,26 @@ int kp_su_load_config(void)
 		if (path[0])
 			kp_su_reset_path(path);
 		vfree(path);
+	}
+
+	/* SELinux target for granted roots. Boot order makes this the reliable
+	 * channel: kpinit insmods the ko before the manager can issue any
+	 * supercall, so the persisted file decides which domain a ramdisk
+	 * (init_boot) patched device grants root in. A missing/blank file leaves
+	 * the built-in default (kernel domain when the AVC bypass is armed). */
+	{
+		loff_t slen = 0;
+		char *sctx = kp_read_config_file(AP_SU_SCTX_FILE, &slen);
+
+		if (sctx) {
+			size_t n = strlen(sctx);
+			while (n > 0 && (sctx[n - 1] == '\n' || sctx[n - 1] == '\r' ||
+					 sctx[n - 1] == ' ' || sctx[n - 1] == '\t'))
+				sctx[--n] = '\0';
+			if (sctx[0])
+				kp_set_all_allow_sctx(sctx);
+			vfree(sctx);
+		}
 	}
 
 	return kp_load_package_config();

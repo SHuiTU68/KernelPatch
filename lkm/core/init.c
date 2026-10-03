@@ -79,15 +79,6 @@ int __init kernelpatch_init(void)
 	if (rc)
 		return rc;
 
-	rc = kp_sucompat_init();
-	if (rc)
-		return rc;
-
-	/* Auto-apply APatch config (su path + package allowlist) from
-	 * /data/adb/ap. Only used on jailbroken devices where those files exist
-	 * at insmod time; the supercall path remains the manager's fallback. */
-	kp_su_load_config();
-
 	rc = kp_hook_runtime_init();
 	if (rc)
 		/* No executable-memory path for hook trampolines (set_memory_x and
@@ -98,6 +89,25 @@ int __init kernelpatch_init(void)
 	rc = kp_bypass_kcfi();
 	if (rc)
 		logkw("CFI bypass failed: %d\n", rc);
+
+	/* Arm the SELinux all-allow bypass before any su can be granted. A
+	 * failure is non-fatal: kp_get_default_su_sctx() then keeps su on the
+	 * magisk domain instead of a kernel domain that could not exec sh. */
+	rc = kp_bypass_selinux_init();
+	if (rc)
+		logkw("SELinux bypass unavailable (%d); su stays on the magisk domain\n", rc);
+
+	/* Needs the bypass decision above (the default scontext depends on it)
+	 * and runs before kp_su_load_config() so the on-disk overrides win. */
+	rc = kp_sucompat_init();
+	if (rc)
+		return rc;
+
+	/* Auto-apply APatch config (su path, all-allow scontext + package
+	 * allowlist) from /data/adb/ap. Only used on jailbroken/ramdisk-patched
+	 * devices where those files exist at insmod time; the supercall path
+	 * remains the manager's fallback. */
+	kp_su_load_config();
 
 	rc = kp_kpm_init();
 	if (rc)
@@ -127,6 +137,9 @@ int __init kernelpatch_init(void)
 static void __exit kernelpatch_exit(void)
 {
 	kp_sucompat_hook_exit();
+	/* kernel-text inline hook on avc_denied; must go before the module text
+	 * (and its trampolines) is freed. */
+	kp_bypass_selinux_exit();
 	hook_rename_lsm_exit();
 	kp_supercall_uninstall();
 	/* Unhook the CFI bypass last so it shields the other teardown from
