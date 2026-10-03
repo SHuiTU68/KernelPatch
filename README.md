@@ -15,6 +15,10 @@
 - Inject arbitrary code into the kernel. (Static patching the kernel image or Runtime dynamic loading).
 - Kernel function inline hook and syscall table hook are provided.
 - Additional SU for Android.
+- Two delivery paths: the image-patched `kpimg`, or the loadable kernel
+  module (`lkm/`) loaded from the Android ramdisk by
+  [`kpinit`](./ramdisk) — the KernelSU/Magisk style, where the kernel image
+  and `boot.img` kernel stay untouched.
 
 If you are using Android, [APatch](https://github.com/bmax121/APatch) would be a better choice.
 
