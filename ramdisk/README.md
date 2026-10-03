@@ -49,17 +49,25 @@ panics the kernel).
 
 ## Build
 
+The arm64 binaries are linked against **bionic**, never glibc: build them with
+the Android NDK clang and keep `-static`. A `aarch64-linux-gnu-gcc -static`
+binary is a static glibc build, and glibc registers an rseq area during startup
+with a syscall that Android's seccomp filters answer with `SIGSYS` — the
+process dies instantly and the patcher reports the classic *Bad system call*,
+so the init_boot path can never work.
+
 ```sh
 cd ramdisk
-make                      # kpinit-android + kpramdisk-android (static arm64)
+make                      # NDK clang, static bionic arm64
+make ANDROID_NDK=/opt/android-ndk
+make check-android        # fails on a glibc / dynamic build
 make check                # host build + lz4/cpio/boot image round trip selftest
-make TARGET_CC=clang
 ```
 
-CI (`.github/workflows/build-kpinit.yml`) builds on every change under
-`ramdisk/**`, runs `make check`, and uploads `kpinit-android` +
-`kpramdisk-android` to the release of the current `version` file — APatch
-downloads them next to `kpimg-android` / `kptools-android`.
+CI (`.github/workflows/build-kpinit.yml`) sets up NDK r26b, builds on every
+change under `ramdisk/**`, runs `check-android` + `make check`, and uploads
+`kpinit-android` + `kpramdisk-android` to the release of the current `version`
+file — APatch downloads them next to `kpimg-android` / `kptools-android`.
 
 ## Usage
 

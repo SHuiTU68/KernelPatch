@@ -27,17 +27,26 @@ jobs:
           echo "Generated Version: $VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Install aarch64 toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+      # bionic, not glibc: a static glibc binary is killed by Android's seccomp
+      # filters with SIGSYS, which is what the patcher reports as the classic
+      # "Bad system call" when it runs kpramdisk.
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
 
-      - name: Build kpinit + kpramdisk
+      - name: Build kpinit + kpramdisk (static bionic)
+        env:
+          ANDROID_NDK: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           make -C ramdisk clean
           make -C ramdisk
           file ramdisk/kpinit-android ramdisk/kpramdisk-android
           du -h ramdisk/kpinit-android ramdisk/kpramdisk-android
+
+      - name: Verify the targets are bionic, not glibc
+        run: make -C ramdisk check-android
 
       - name: Selftest (lz4 legacy + cpio + boot image round trip)
         run: make -C ramdisk check
