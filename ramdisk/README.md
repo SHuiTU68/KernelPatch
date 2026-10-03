@@ -62,10 +62,14 @@ alignment is 8, needs to be at least 64 for ARM64 Bionic*). A plain `-static`
 bionic link lands exactly there: the one 8-byte thread-local object that is
 pulled out of `libc.a` sets the alignment of the TLS segment to 8, and the
 loader aborts before `main()` ever runs — the patcher then fails on
-`./kpramdisk` instead of on the boot image. `tls_align.c` is linked into both
-binaries and pins the alignment to 64 with a single 64-byte aligned
-thread-local object, and `make check-android` fails the build if it ever drops
-below 64 again.
+`./kpramdisk` instead of on the boot image. `tls_align.S` is linked into both
+binaries and pins the alignment to 64 by placing a 64-byte aligned object into
+`.tbss` directly. It is assembly on purpose: for Android targets clang compiles
+`_Thread_local` into *emulated* TLS by default, which turns into an ordinary
+32-byte descriptor in the data segment — it never reaches `.tbss`, so a C level
+anchor silently does nothing (that is how the first attempt at this fix failed
+on CI). `make check-android` fails the build if the alignment ever drops below
+64 again.
 
 ```sh
 cd ramdisk

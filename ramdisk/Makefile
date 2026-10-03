@@ -19,7 +19,7 @@
 #
 # bionic also refuses to exec an arm64 binary whose TLS segment is aligned to
 # less than 64 bytes ("executable's TLS segment is underaligned"), which is
-# what a plain `-static` link produces: see tls_align.c, linked into both.
+# what a plain `-static` link produces: see tls_align.S, linked into both.
 #
 #   make                            -> both targets, static bionic arm64
 #   make ANDROID_NDK=/opt/android-ndk
@@ -49,8 +49,8 @@ CFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter
 ANDROID_BINS = kpinit-android kpramdisk-android
 KPRAMDISK_OBJS = kpramdisk.c cpio.c bootimg.c lz4legacy.c
 # Linked into both Android binaries: it pins the PT_TLS alignment to 64, which
-# arm64 bionic insists on before it will start the program (see tls_align.c).
-TLS_ANCHOR = tls_align.c
+# arm64 bionic insists on before it will start the program (see tls_align.S).
+TLS_ANCHOR = tls_align.S
 
 # A stale path (forgotten ANDROID_NDK) should say so instead of dying inside
 # the shell with a bare "No such file or directory".
@@ -100,7 +100,7 @@ check-android: $(ANDROID_BINS)
 	  if [ -n "$$tls" ] && [ $$((tls)) -lt 64 ]; then \
 	    echo "$$f: PT_TLS alignment is $$tls, arm64 bionic needs at least 64" >&2; \
 	    echo " (bionic aborts the exec: TLS segment is underaligned)" >&2; \
-	    echo " link tls_align.c in, or the patcher will fail at runtime" >&2; \
+	    echo " link tls_align.S in, or the patcher will fail at runtime" >&2; \
 	    fail=1; \
 	  fi; \
 	done; \
