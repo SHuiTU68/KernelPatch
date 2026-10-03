@@ -106,6 +106,29 @@ gzip ramdisks are rejected with a clear error (not needed on GKI devices).
 * `make check` covers the lz4 stream codec, the cpio reader/writer and a
   full assemble → parse → repack → re-parse cycle of a boot image.
 
+* the check is repeatable on any patched image with `verify_patch.py` — an
+  independent verifier that decodes the ramdisk with the reference `lz4` CLI
+  and compares both archives entry by entry. It was run both against the
+  locally built binaries and against the CI-built release assets
+  (`kpramdisk-android` + `kpinit-android` of the current release, which produce
+  byte-identical output):
+
+  ```text
+  $ kpramdisk inject init_boot_a.img patched.img \
+        --init kpinit-android --ko android15-6.6_kernelpatch.ko \
+        --params "skey=release-key"
+  $ python3 verify_patch.py init_boot_a.img patched.img \
+        kpinit-android android15-6.6_kernelpatch.ko "skey=release-key"
+  stock entries   : 36
+  patched entries : 39
+  init -> init.real identical : True (200656 bytes)
+  init             == kpinit-android : True (702416 bytes)
+  kernelpatch.ko   == android15-6.6_kernelpatch.ko : True (172112 bytes)
+  kp_config        == b'skey=release-key' : True (mode 0o100644)
+  avb footer -> 832 bytes @ 3567616, after ramdisk : True
+  RESULT: ALL GOOD
+  ```
+
 ## Status / caveats
 
 * loader, injector and handover are implemented and compile warning-free for
