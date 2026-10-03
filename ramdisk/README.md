@@ -56,16 +56,28 @@ with a syscall that Android's seccomp filters answer with `SIGSYS` — the
 process dies instantly and the patcher reports the classic *Bad system call*,
 so the init_boot path can never work.
 
+bionic additionally refuses to start an arm64 binary whose `PT_TLS` segment is
+aligned to less than 64 bytes (*executable's TLS segment is underaligned:
+alignment is 8, needs to be at least 64 for ARM64 Bionic*). A plain `-static`
+bionic link lands exactly there: the one 8-byte thread-local object that is
+pulled out of `libc.a` sets the alignment of the TLS segment to 8, and the
+loader aborts before `main()` ever runs — the patcher then fails on
+`./kpramdisk` instead of on the boot image. `tls_align.c` is linked into both
+binaries and pins the alignment to 64 with a single 64-byte aligned
+thread-local object, and `make check-android` fails the build if it ever drops
+below 64 again.
+
 ```sh
 cd ramdisk
 make                      # NDK clang, static bionic arm64
 make ANDROID_NDK=/opt/android-ndk
-make check-android        # fails on a glibc / dynamic build
+make check-android        # fails on a glibc / dynamic / underaligned build
 make check                # host build + lz4/cpio/boot image round trip selftest
 ```
 
 CI (`.github/workflows/build-kpinit.yml`) sets up NDK r26b, builds on every
-change under `ramdisk/**`, runs `check-android` + `make check`, and uploads
+change under `ramdisk/**`, runs `check-android` (static, glibc-free,
+TLS alignment >= 64) + `make check`, and uploads
 `kpinit-android` + `kpramdisk-android` to the release of the current `version`
 file — APatch downloads them next to `kpimg-android` / `kptools-android`.
 

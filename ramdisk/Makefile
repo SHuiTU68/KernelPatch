@@ -17,6 +17,10 @@
 # "Bad system call". Static bionic (what Magisk's busybox uses) only issues raw
 # syscalls and runs in any Android process, ramdisk or app sandbox alike.
 #
+# bionic also refuses to exec an arm64 binary whose TLS segment is aligned to
+# less than 64 bytes ("executable's TLS segment is underaligned"), which is
+# what a plain `-static` link produces: see tls_align.c, linked into both.
+#
 #   make                            -> both targets, static bionic arm64
 #   make ANDROID_NDK=/opt/android-ndk
 #   make TARGET_CC=/path/to/clang   -> any other bionic/musl cross compiler
@@ -44,6 +48,9 @@ CFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter
 
 ANDROID_BINS = kpinit-android kpramdisk-android
 KPRAMDISK_OBJS = kpramdisk.c cpio.c bootimg.c lz4legacy.c
+# Linked into both Android binaries: it pins the PT_TLS alignment to 64, which
+# arm64 bionic insists on before it will start the program (see tls_align.c).
+TLS_ANCHOR = tls_align.c
 
 # A stale path (forgotten ANDROID_NDK) should say so instead of dying inside
 # the shell with a bare "No such file or directory".
@@ -54,14 +61,14 @@ CHECK_TOOLCHAIN = @command -v "$(TARGET_CC)" >/dev/null 2>&1 || [ -x "$(TARGET_C
 
 all: $(ANDROID_BINS)
 
-kpinit-android: kpinit.c
+kpinit-android: kpinit.c $(TLS_ANCHOR)
 	$(CHECK_TOOLCHAIN)
-	$(TARGET_CC) $(CFLAGS) -static -o $@ $<
+	$(TARGET_CC) $(CFLAGS) -static -o $@ kpinit.c $(TLS_ANCHOR)
 	ls -l $@
 
-kpramdisk-android: $(KPRAMDISK_OBJS) cpio.h bootimg.h lz4legacy.h
+kpramdisk-android: $(KPRAMDISK_OBJS) $(TLS_ANCHOR) cpio.h bootimg.h lz4legacy.h
 	$(CHECK_TOOLCHAIN)
-	$(TARGET_CC) $(CFLAGS) -static -o $@ $(KPRAMDISK_OBJS)
+	$(TARGET_CC) $(CFLAGS) -static -o $@ $(KPRAMDISK_OBJS) $(TLS_ANCHOR)
 	ls -l $@
 
 # host build of the injector: lets `make check` exercise the real code
@@ -71,7 +78,9 @@ kpramdisk: $(KPRAMDISK_OBJS) cpio.h bootimg.h lz4legacy.h
 # A glibc build only fails at runtime, as a SIGSYS inside the patcher, so gate
 # it at build time: the `GLIBC_` version strings and the `rseq` support are
 # glibc-only (bionic has neither), and the first stage ramdisk has no dynamic
-# linker for a dynamically linked binary to attach to.
+# linker for a dynamically linked binary to attach to. The TLS alignment is
+# checked here too: a wrong one is rejected by the loader before main() runs,
+# so it can only be caught at build time.
 check-android: $(ANDROID_BINS)
 	@fail=0; \
 	for f in $(ANDROID_BINS); do \
@@ -83,13 +92,20 @@ check-android: $(ANDROID_BINS)
 	    echo "$$f: has glibc's rseq support, Android kills that with SIGSYS" >&2; \
 	    fail=1; \
 	  fi; \
-	  if readelf -l $$f 2>/dev/null | grep -q INTERP; then \
+	  if readelf -lW $$f 2>/dev/null | grep -q INTERP; then \
 	    echo "$$f: is dynamically linked, the first stage ramdisk has no linker" >&2; \
+	    fail=1; \
+	  fi; \
+	  tls=$$(readelf -lW $$f 2>/dev/null | awk '$$1 == "TLS" { print $$NF; exit }'); \
+	  if [ -n "$$tls" ] && [ $$((tls)) -lt 64 ]; then \
+	    echo "$$f: PT_TLS alignment is $$tls, arm64 bionic needs at least 64" >&2; \
+	    echo " (bionic aborts the exec: TLS segment is underaligned)" >&2; \
+	    echo " link tls_align.c in, or the patcher will fail at runtime" >&2; \
 	    fail=1; \
 	  fi; \
 	done; \
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
-	echo "check-android: $(ANDROID_BINS) are static and glibc-free"
+	echo "check-android: $(ANDROID_BINS) are static, glibc-free and TLS-aligned"
 
 check: kpramdisk
 	./kpramdisk selftest
