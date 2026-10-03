@@ -7,15 +7,30 @@
 #   make                     -> ramdisk/kpinit-android (static arm64)
 #   make TARGET_CC=clang     -> use any cross compiler
 TARGET_CC ?= aarch64-linux-gnu-gcc
+HOST_CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter
 
-all: kpinit-android
+KPRAMDISK_OBJS = kpramdisk.c cpio.c bootimg.c lz4legacy.c
+
+all: kpinit-android kpramdisk-android
 
 kpinit-android: kpinit.c
 	$(TARGET_CC) $(CFLAGS) -static -o $@ $<
 	ls -l $@
 
-clean:
-	rm -f kpinit-android
+kpramdisk-android: $(KPRAMDISK_OBJS) cpio.h bootimg.h lz4legacy.h
+	$(TARGET_CC) $(CFLAGS) -static -o $@ $(KPRAMDISK_OBJS)
+	ls -l $@
 
-.PHONY: all clean
+# host build of the injector: lets `make check` exercise the real code
+kpramdisk: $(KPRAMDISK_OBJS) cpio.h bootimg.h lz4legacy.h
+	$(HOST_CC) $(CFLAGS) -o $@ $(KPRAMDISK_OBJS)
+
+check: kpramdisk
+	./kpramdisk selftest
+
+clean:
+	rm -f kpinit-android kpramdisk-android kpramdisk
+	rm -rf .selftest
+
+.PHONY: all check clean

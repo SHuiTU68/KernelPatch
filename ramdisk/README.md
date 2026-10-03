@@ -1,91 +1,124 @@
-# KernelPatch ramdisk hook (`kpinit`)
+# KernelPatch ramdisk delivery (`kpinit` + `kpramdisk`)
 
-`kpinit` is the second delivery path of KernelPatch, next to the
-image-patched `kpimg`:
+This directory is the KernelSU-style delivery path of KernelPatch, sitting next
+to the image-patched `kpimg`:
 
 | | delivery | what is touched |
 |---|---|---|
-| `kpimg` | kernel image (kptools patches the boot image kernel, kpimg takes over the boot flow) | `boot.img` kernel |
-| `lkm/` + `kpinit` | Android ramdisk (`init_boot.img`, or `boot.img` on Android 12) | ramdisk only |
+| `kpimg` | kernel image (kptools patches the boot kernel, kpimg takes over the boot flow) | `boot.img` kernel |
+| `lkm/` + `kpinit` + `kpramdisk` | Android ramdisk (`init_boot.img`, or `boot.img` on Android 12) | ramdisk only |
 
-The KernelPatch LKM (`lkm/`, published as `<kmi>_kernelpatch.ko`) already
-provides the whole supercall/SU channel on a **stock kernel**, it only needs
-somebody to load it early at boot.  `kpinit` is that somebody, exactly like
-KernelSU's `ksuinit` or Magisk's `magiskinit`.
+Both sides are deliberate C re-implementations of KernelSU's userspace
+(GPL-2.0, [tiann/KernelSU](https://github.com/tiann/KernelSU)):
 
-## How the injection looks
+| KernelSU | here |
+|---|---|
+| `userspace/ksuinit` (`main.rs`, `init.rs`, `lib.rs`) | `kpinit.c` — PID 1 hook, loads the LKM |
+| `userspace/ksud boot_patch` (`boot_patch.rs`) | `kpramdisk.c` — injects it into the ramdisk |
+| `kernelsu.ko` / `ksu_config` | `kernelpatch.ko` / `kp_config` |
 
-The patcher has to rewrite the ramdisk cpio (newc format):
+## Pipeline
 
 ```text
-cpio.mv("init",     "init.real")        # keep the stock first-stage init
-cpio.add("init",    kpinit)             # becomes PID 1
-cpio.add("kernelpatch.ko", <kmi>_kernelpatch.ko)
+init_boot.img ──► kpramdisk inject ──► patched init_boot.img
+                       │  cpio.mv("init", "init.real")
+                       │  cpio.add("init", kpinit, 0755)
+                       │  cpio.add("kernelpatch.ko", <kmi>_kernelpatch.ko, 0755)
+                       │  cpio.add("kp_config", "<params>", 0644)      (optional)
+                       ▼
+              kernel starts kpinit as PID 1
+                       │  1. mounts devtmpfs/proc/sysfs, makes /dev/kmsg usable
+                       │  2. skips everything if /sys/module/kernelpatch exists
+                       │  3. resolves every undefined symbol of the .ko by
+                       │     streaming /proc/kallsyms (kptr_restrict relaxed and
+                       │     restored), rewrites the symbol table in place
+                       │     (st_shndx = SHN_ABS, st_value = <kernel addr>)
+                       │  4. init_module(2) — KernelSU's manual relocation, which
+                       │     makes the per-symbol CRC/vermagic checks moot
+                       │  5. on a vermagic mismatch: read the required value from
+                       │     /dev/kmsg, rewrite .modinfo, retry exactly once
+                       │  6. unlink("/init") + symlink("/init.real" | "/system/bin/init")
+                       │     + execv("/init") — the KernelSU handover
+                       ▼
+                untouched Android init continues the boot
 ```
 
-At boot the kernel starts `kpinit` as PID 1, kpinit:
-
-1. mounts `devtmpfs` / `proc` / `sysfs` (needed to read `/proc/kallsyms`),
-2. resolves every undefined symbol of `kernelpatch.ko` against
-   `/proc/kallsyms` and rewrites the symbol table in place
-   (`st_shndx = SHN_ABS`, `st_value = <kernel address>`),
-3. calls `init_module(2)` — because the module still carries a `__versions`
-   section the kernel skips the vermagic check, and the manual relocation
-   makes the per-symbol CRC check moot, so an unsigned `.ko` builds from
-   Android's DDK loads on a stock kernel,
-4. `execv()`s `/init.real` so the untouched Android init continues the boot.
-
-Every step is best effort: if the module cannot be loaded (wrong KMI, module
-support disabled, `CONFIG_MODULE_SIG_FORCE=y`) kpinit logs the reason to
-`/dev/kmsg` and **still boots the system** without root.  It never exits, so
-a failed handover can not panic the kernel.
-
-This is the same mechanism `apd insmod` uses (`apd/src/insmod.rs` in APatch,
-a port of KernelSU's `ksuinit::load_module`); `kpinit` is the C/static
-standalone version that can live in a ramdisk without any userland.
+Every step is best effort: a missing/mismatching module is logged to
+`/dev/kmsg` and the system still boots. `kpinit` never exits (a dead PID 1
+panics the kernel).
 
 ## Build
 
 ```sh
 cd ramdisk
-make                      # -> ramdisk/kpinit-android (static aarch64)
+make                      # kpinit-android + kpramdisk-android (static arm64)
+make check                # host build + lz4/cpio/boot image round trip selftest
 make TARGET_CC=clang
 ```
 
-CI (`.github/workflows/build-kpinit.yml`) builds it on every change under
-`ramdisk/**` and uploads `kpinit-android` to the release of the current
-`version` file — APatch downloads it next to `kpimg-android` /
-`kptools-android`.
+CI (`.github/workflows/build-kpinit.yml`) builds on every change under
+`ramdisk/**`, runs `make check`, and uploads `kpinit-android` +
+`kpramdisk-android` to the release of the current `version` file — APatch
+downloads them next to `kpimg-android` / `kptools-android`.
 
-## Manual use / debugging
+## Usage
 
 ```sh
-kpinit --version
-kpinit insmod /path/to/kernelpatch.ko        # same loader, no init handover
-kpinit                                       # boot mode, refuses to run if not PID 1
+# inspect
+kpramdisk info  init_boot.img
+kpramdisk list  init_boot.img              # cpio entries (+ symlink targets)
+
+# patch (kpinit-android + the LKM of the device KMI)
+kpramdisk inject init_boot.img patched.img \
+    --init kpinit-android \
+    --ko   android15-6.6_kernelpatch.ko \
+    --params "skey=my-superkey"
+
+# runtime loading, e.g. from an already rooted device
+kpinit insmod /data/local/tmp/android15-6.6_kernelpatch.ko
 ```
 
-## Status
+`kpramdisk` refuses to patch an image twice (the ramdisk already carries
+`kernelpatch.ko`) unless `--force` is given, and it never overwrites an
+existing `init.real` — a ramdisk that already went through Magisk or KernelSU
+is left intact and `kpinit` simply chains to whatever `/init.real` is there.
 
-* loader + init handover: implemented, compiles clean, boot path not yet
-  exercised on a device with a real KMI module.
-* The `.ko` is the *framework* LKM (`lkm/README.md` lists its TODOs:
-  `SUPERCALL_SU_TASK`, kpm loader, kstorage, allowlist persistence,
-  SELinux translabel, inline-hook infra).
-* Not implemented: ramdisk cpio/gzip|lz4 editing (that lives on the patcher
-  side — APatch), AVB/vbmeta handling (the patched ramdisk is only usable on
-  a device with a disabled/unlocked verified boot chain).
+Supported ramdisks: `lz4_legacy` (the GKI norm) and uncompressed cpio.
+gzip ramdisks are rejected with a clear error (not needed on GKI devices).
 
-## Caveats
+## Verified
 
-* **Do not inject twice.**  A ramdisk that already contains Magisk
-  (`.backup/.magisk`, `overlay.d/sbin/magisk.xz`) or KernelSU already
-  replaced `init`.  Injecting kpinit on top of that would chain
-  kpinit -> magiskinit -> init.real, which works (kpinit always hands over to
-  whatever `/init.real` or `/system/bin/init` exists), but the patcher should
-  at least warn and never overwrite a foreign `/init.real`.
-* Keep a flashable image of the unpatched `init_boot`/`boot` partition: a
-  broken ramdisk is a bootloop, and this is PID 1 code.
-* The `.ko` must match the running kernel's KMI (`android15-6.6` for
-  Linux 6.6 `6.6.x-android15`, ...).  Loading a mismatched module fails
-  cleanly (kpinit ignores it) but gives no root.
+* `kpramdisk` on a real device dump (Pixel-style `init_boot_a.img`,
+  header v4, lz4_legacy, 36 cpio entries, Magisk-patched, kernel
+  `6.6.118-android15` → KMI `android15-6.6`):
+
+  ```text
+  ramdisk 2930533 -> 3563637 bytes (lz4_legacy), cpio 4979432 bytes
+  + init (708192 bytes), kernelpatch.ko (172112 bytes)
+  AVB block: 832 bytes relocated behind the new ramdisk, footer updated,
+             image size kept at 8388608 bytes
+  ```
+
+* the repacked ramdisk decodes with the reference `lz4` CLI (4 979 432 bytes);
+  all 36 original entries are byte-identical after the round trip, `init`
+  became `init.real`, and `init`/`kernelpatch.ko`/`kp_config` match their
+  source files (sha-compared).
+* `make check` covers the lz4 stream codec, the cpio reader/writer and a
+  full assemble → parse → repack → re-parse cycle of a boot image.
+
+## Status / caveats
+
+* loader, injector and handover are implemented and compile warning-free for
+  aarch64 and host; the **boot path itself has not been exercised on a device**
+  yet (needs a flash with verification disabled).
+* `--ko` must match the running KMI (`android15-6.6` for Linux 6.6
+  `-android15`). A mismatch fails cleanly, the vermagic retry recovers only
+  when the kernel accepts the rewritten value.
+* **AVB**: the vbmeta struct is relocated and the footer rewritten, but the
+  signature cannot be recomputed — flash with verified boot disabled, exactly
+  like a Magisk/KernelSU patched image. Keep a backup of the unpatched
+  partition: a broken ramdisk is a bootloop, and this is PID 1 code.
+* the LKM is still the *framework* one (`lkm/README.md` lists the TODOs:
+  `SUPERCALL_SU_TASK`, kpm loader, kstorage, allowlist persistence, SELinux
+  translabel, inline-hook infra), so a successful ramdisk boot provides the
+  KernelPatch supercall channel, not yet a full-featured root.
