@@ -77,6 +77,11 @@ int kp_accctl_init(void)
  */
 char kp_all_allow_sctx[SUPERCALL_SCONTEXT_LEN];
 static u32 kp_all_allow_sid;
+/* Requested context, kept even while its sid cannot be resolved yet. On an
+ * init_boot/ramdisk boot kpinit insmods the ko as PID 1, before init has
+ * loaded the SELinux policy, so the very first resolution always fails and has
+ * to be retried later -- see kp_arm_all_allow_sctx(). */
+static char kp_wanted_sctx[SUPERCALL_SCONTEXT_LEN];
 
 static bool kp_bypass_installed;
 static unsigned long kp_avc_denied_addr;
@@ -89,17 +94,37 @@ bool kp_selinux_bypass_active(void)
 	return kp_bypass_installed;
 }
 
+/* Resolve kp_wanted_sctx to a sid and arm the bypass with it.
+ *
+ * Cheap and idempotent, and called from every entry point that needs the
+ * all-allow sid: the first call usually happens before the SELinux policy
+ * exists (ramdisk/init_boot boot, or an embedded kpimg module init), so a
+ * failure here is expected and simply retried on the next use. */
+static void kp_arm_all_allow_sctx(void)
+{
+	u32 sid = 0;
+
+	if (kp_all_allow_sid || !kp_bypass_installed || !kp_wanted_sctx[0])
+		return;
+
+	if (security_secctx_to_secid(kp_wanted_sctx, strlen(kp_wanted_sctx), &sid) || !sid)
+		return; /* no policy yet, nothing to whitelist */
+
+	strscpy(kp_all_allow_sctx, kp_wanted_sctx, sizeof(kp_all_allow_sctx));
+	kp_all_allow_sid = sid;
+	logki("all-allow scontext armed: %s (sid %u)\n", kp_all_allow_sctx, sid);
+}
+
 const char *kp_get_all_allow_sctx(void)
 {
+	kp_arm_all_allow_sctx();
 	return kp_all_allow_sctx;
 }
 
 int kp_set_all_allow_sctx(const char *sctx)
 {
-	u32 sid = 0;
-	int rc;
-
 	if (!sctx || !sctx[0]) {
+		kp_wanted_sctx[0] = '\0';
 		kp_all_allow_sctx[0] = '\0';
 		kp_all_allow_sid = 0;
 		logki("all-allow scontext cleared\n");
@@ -111,21 +136,27 @@ int kp_set_all_allow_sctx(const char *sctx)
 		return -EOPNOTSUPP;
 	}
 
-	rc = security_secctx_to_secid(sctx, strlen(sctx), &sid);
-	if (rc || !sid) {
-		logkw("all-allow scontext %s unresolvable: %d\n", sctx, rc);
-		return rc ? rc : -EINVAL;
-	}
+	/* Record the request first, then arm: if the sid cannot be resolved yet
+	 * the request is not lost, it just stays pending until a later call. */
+	strscpy(kp_wanted_sctx, sctx, sizeof(kp_wanted_sctx));
+	kp_all_allow_sctx[0] = '\0';
+	kp_all_allow_sid = 0;
+	kp_arm_all_allow_sctx();
 
-	strscpy(kp_all_allow_sctx, sctx, sizeof(kp_all_allow_sctx));
-	kp_all_allow_sid = sid;
-	logki("all-allow scontext: %s (sid %u)\n", kp_all_allow_sctx, sid);
+	if (!kp_all_allow_sid) {
+		logkw("all-allow scontext %s pending (no policy yet)\n", sctx);
+		return -EINVAL;
+	}
 	return 0;
 }
 
 const char *kp_get_default_su_sctx(void)
 {
-	if (kp_all_allow_sctx[0])
+	/* A domain whose sid the bypass does not whitelist is a footgun: the
+	 * process would land in a domain it cannot do anything from. Only hand
+	 * out the armed context; otherwise stay on the magisk domain. */
+	kp_arm_all_allow_sctx();
+	if (kp_all_allow_sid)
 		return kp_all_allow_sctx;
 	return ALL_ALLOW_SCONTEXT_MAGISK;
 }
@@ -197,7 +228,8 @@ int kp_bypass_selinux_init(void)
 	 * /data/adb/ap/su_sctx (read at module init). */
 	rc = kp_set_all_allow_sctx(ALL_ALLOW_SCONTEXT_KERNEL);
 	if (rc)
-		logkw("default all-allow scontext failed: %d\n", rc);
+		logki("default all-allow scontext %s pending: %d\n",
+		      ALL_ALLOW_SCONTEXT_KERNEL, rc);
 	return 0;
 }
 
@@ -208,6 +240,7 @@ void kp_bypass_selinux_exit(void)
 		kp_avc_denied_addr = 0;
 		kp_avc_denied_backup = NULL;
 		kp_bypass_installed = false;
+		kp_wanted_sctx[0] = '\0';
 		kp_all_allow_sctx[0] = '\0';
 		kp_all_allow_sid = 0;
 	}
@@ -298,9 +331,14 @@ static int commit_common_su(uid_t to_uid, const char *sctx)
  * found) fully working instead of granting a root that cannot do anything. */
 static const char *kp_effective_su_sctx(const char *sctx)
 {
+	/* Retry arming here as well: on a ramdisk (init_boot) boot the module
+	 * init ran before init loaded the SELinux policy, so the first su is what
+	 * actually arms the bypass. */
+	kp_arm_all_allow_sctx();
+
 	if (!sctx || !sctx[0])
 		return kp_get_default_su_sctx();
-	if (!kp_selinux_bypass_active() && strcmp(sctx, ALL_ALLOW_SCONTEXT_KERNEL) == 0) {
+	if (!kp_all_allow_sid && strcmp(sctx, ALL_ALLOW_SCONTEXT_KERNEL) == 0) {
 		logkw("kernel domain requested without the SELinux bypass; using magisk\n");
 		return ALL_ALLOW_SCONTEXT_MAGISK;
 	}
